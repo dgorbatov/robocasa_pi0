@@ -11,15 +11,8 @@ import numpy as np
 import torch
 import imageio
 
-# Set environment variables before importing robosuite
-os.environ.setdefault("MUJOCO_GL", "egl")
-os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
-
-import robosuite
-import robocasa  # noqa: F401 - registers environments
-from robosuite.controllers import load_composite_controller_config
-
 from pi0_model import Pi0RobocasaModel
+from subprocess_env import SubprocessEnv
 
 
 # Task descriptions for RoboCasa atomic tasks
@@ -51,46 +44,53 @@ TASK_DESCRIPTIONS = {
 }
 
 
-def make_env(task: str, seed: int = 0, video_camera: str = None):
-    """Create a single RoboCasa environment.
+def make_env_fn(task: str, seed: int = 0):
+    """Create a factory function for making a RoboCasa environment.
 
-    Args:
-        task: RoboCasa task name
-        seed: Random seed
-        video_camera: Optional camera name for video recording (higher resolution)
+    Returns a callable that creates the environment (for subprocess isolation).
     """
-    controller_config = load_composite_controller_config(
-        controller=None,
-        robot="PandaOmron",
-    )
+    def _make():
+        # These imports happen in the subprocess
+        import os
+        os.environ.setdefault("MUJOCO_GL", "egl")
+        os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
-    # Base cameras for policy input
-    camera_names = ["robot0_agentview_left", "robot0_eye_in_hand"]
-    camera_widths = [128, 128]
-    camera_heights = [128, 128]
+        import robosuite
+        import robocasa  # noqa: F401 - registers environments
+        from robosuite.controllers import load_composite_controller_config
 
-    # Add video camera if specified and not already in list
-    # if video_camera and video_camera not in camera_names:
-    #     camera_names.append(video_camera)
-    #     camera_widths.append(512)
-    #     camera_heights.append(512)
+        controller_config = load_composite_controller_config(
+            controller=None,
+            robot="PandaOmron",
+        )
 
-    env = robosuite.make(
-        env_name=task,
-        robots="PandaOmron",
-        controller_configs=controller_config,
-        camera_names=camera_names,
-        camera_widths=camera_widths,
-        camera_heights=camera_heights,
-        has_renderer=False,
-        has_offscreen_renderer=True,
-        ignore_done=True,
-        use_object_obs=True,
-        use_camera_obs=True,
-        camera_depths=False,
-        seed=seed,
-    )
-    return env
+        camera_names = ["robot0_agentview_left", "robot0_eye_in_hand"]
+        camera_widths = [128, 128]
+        camera_heights = [128, 128]
+
+        env = robosuite.make(
+            env_name=task,
+            robots="PandaOmron",
+            controller_configs=controller_config,
+            camera_names=camera_names,
+            camera_widths=camera_widths,
+            camera_heights=camera_heights,
+            has_renderer=False,
+            has_offscreen_renderer=True,
+            ignore_done=True,
+            use_object_obs=True,
+            use_camera_obs=True,
+            camera_depths=False,
+            seed=seed,
+        )
+        return env
+
+    return _make
+
+
+def make_env(task: str, seed: int = 0):
+    """Create a subprocess-isolated RoboCasa environment."""
+    return SubprocessEnv(make_env_fn(task, seed))
 
 
 def extract_obs(raw_obs: dict, task_description: str) -> dict:
@@ -104,6 +104,7 @@ def extract_obs(raw_obs: dict, task_description: str) -> dict:
         Formatted observation dict for Pi0 model
     """
     # Get camera images and flip vertically (OpenGL coordinate fix)
+    # Subprocess env already deep copies, but flip creates a view so we copy again
     base_img = raw_obs["robot0_agentview_left_image"][::-1].copy()
     wrist_img = raw_obs["robot0_eye_in_hand_image"][::-1].copy()
 
@@ -153,14 +154,15 @@ def run_episode(
     steps = 0
     frames = []
 
-    # Capture initial frame if recording - render directly from simulator
+    # Capture initial frame if recording - subprocess already deep copies obs
     if video_camera:
-        frame = env.sim.render(height=512, width=512, camera_name=video_camera)
-        frames.append(frame.copy())
-        print(f"  Frame shape: {frame.shape}, dtype: {frame.dtype}, min: {frame.min()}, max: {frame.max()}")
+        frame = raw_obs[f"{video_camera}_image"][::-1].copy()
+        frames.append(frame)
+        if verbose:
+            print(f"  Recording from {video_camera} at {frame.shape[:2]} resolution")
 
     while steps < max_steps:
-        # Get observation
+        # Get observation - copy images immediately before any GPU ops
         obs = extract_obs(raw_obs, task_description)
 
         # Predict action chunk
@@ -173,13 +175,14 @@ def run_episode(
 
             action = actions[0, i]
             raw_obs, reward, done, info = env.step(action)
+
+            # Capture frame for video
+            if video_camera:
+                frame = raw_obs[f"{video_camera}_image"][::-1].copy()
+                frames.append(frame)
+
             total_reward += reward
             steps += 1
-
-            # Capture frame for video - render directly from simulator
-            if video_camera:
-                frame = env.sim.render(height=512, width=512, camera_name=video_camera)
-                frames.append(frame.copy())
 
             if info.get("success", False):
                 success = True
@@ -218,7 +221,7 @@ def main():
     parser.add_argument(
         "--num_episodes",
         type=int,
-        default=1,
+        default=10,
         help="Number of episodes to run",
     )
     parser.add_argument(
@@ -276,7 +279,7 @@ def main():
     for ep in range(args.num_episodes):
         print(f"\nEpisode {ep + 1}/{args.num_episodes}")
         video_camera = args.video_camera if args.video_dir else None
-        env = make_env(args.task, seed=args.seed + ep, video_camera=video_camera)
+        env = make_env(args.task, seed=args.seed + ep)
 
         result = run_episode(
             model,
