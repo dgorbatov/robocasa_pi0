@@ -15,6 +15,36 @@ from pi0_model import Pi0RobocasaModel
 from subprocess_env import SubprocessEnv
 
 
+def prepare_actions_for_robocasa(raw_actions: np.ndarray) -> np.ndarray:
+    """Convert Pi0 output actions to PandaOmron format.
+
+    Pi0 outputs 12D (after RobocasaOutputs slicing), but only [5:12] contains valid data.
+    Extract the valid 7D and convert to 12D PandaOmron format.
+
+    Args:
+        raw_actions: (B, H, 12) array from Pi0 model after RobocasaOutputs
+
+    Returns:
+        actions_12d: (B, H, 12) array ready for PandaOmron environment
+    """
+    # Extract valid 7D from positions [5:12]
+    # These are: [arm_pos(3), arm_ori(3), gripper(1)]
+    actions_7d = raw_actions[..., 5:12]
+
+    # Create 12D output array
+    output_shape = actions_7d.shape[:-1] + (12,)
+    actions_12d = np.zeros(output_shape, dtype=np.float32)
+
+    # Map 7D to PandaOmron's 12D format:
+    # [0:7] = arm control (3 pos + 3 ori + 1 gripper)
+    # [7:11] = base control (unused, zeros)
+    # [11] = mode flag (0 = control arm, 1 = control base)
+    actions_12d[..., 0:7] = actions_7d
+    actions_12d[..., -1] = 0  # Always control arm, not base
+
+    return actions_12d
+
+
 # Task descriptions for RoboCasa atomic tasks
 TASK_DESCRIPTIONS = {
     "OpenSingleDoor": "open cabinet or microwave door",
@@ -165,8 +195,14 @@ def run_episode(
         # Get observation - copy images immediately before any GPU ops
         obs = extract_obs(raw_obs, task_description)
 
-        # Predict action chunk
-        actions = model.predict_actions(obs)  # (1, horizon, action_dim)
+        # Predict action chunk and convert to PandaOmron format
+        raw_actions = model.predict_actions(obs)  # (1, horizon, 12)
+        actions = prepare_actions_for_robocasa(raw_actions)  # (1, horizon, 12)
+
+        # Debug: print action stats on first chunk
+        if steps == 0 and verbose:
+            print(f"  Raw action[0,0]: {raw_actions[0, 0, :7]}...{raw_actions[0, 0, -1]}")
+            print(f"  Processed action[0,0]: {actions[0, 0, :7]}...{actions[0, 0, -1]}")
 
         # Execute actions
         for i in range(min(action_chunk_size, actions.shape[1])):
@@ -214,20 +250,20 @@ def main():
     parser.add_argument(
         "--task",
         type=str,
-        default="CloseDrawer",
+        default="PnPCounterToCab",
         choices=list(TASK_DESCRIPTIONS.keys()),
         help="RoboCasa task name",
     )
     parser.add_argument(
         "--num_episodes",
         type=int,
-        default=10,
+        default=5,
         help="Number of episodes to run",
     )
     parser.add_argument(
         "--max_steps",
         type=int,
-        default=300,
+        default=500,
         help="Maximum steps per episode",
     )
     parser.add_argument(
@@ -298,11 +334,6 @@ def main():
         if args.video_dir and "frames" in result:
             status = "success" if result["success"] else "fail"
             frames = result["frames"]
-
-            # Debug: save first and last frame as images
-            imageio.imwrite(os.path.join(args.video_dir, f"{args.task}_ep{ep:03d}_frame000.png"), frames[0])
-            imageio.imwrite(os.path.join(args.video_dir, f"{args.task}_ep{ep:03d}_frame{len(frames)-1:03d}.png"), frames[-1])
-            print(f"  Saved debug frames: first and last of {len(frames)} frames")
 
             video_path = os.path.join(
                 args.video_dir,
