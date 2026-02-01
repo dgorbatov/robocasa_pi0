@@ -1,0 +1,20 @@
+# PyTorch
+torch>=2.0.0
+torchvision>=0.15.0
+
+
+# Simulation
+# robosuite>=1.4.0
+# robocasa
+
+# Model loading
+safetensors>=0.4.0
+
+# Array/tensor utilities
+numpy>=1.24.0
+einops>=0.7.0
+jax>=0.4.0
+
+# Video/image utilities
+imageio>=2.31.0
+pillow>=10.0.0

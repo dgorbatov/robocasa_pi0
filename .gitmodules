@@ -1,0 +1,9 @@
+[submodule "robosuite"]
+	path = robosuite
+	url = https://github.com/ARISE-Initiative/robosuite.git
+[submodule "robocasa"]
+	path = robocasa
+	url = https://github.com/robocasa/robocasa.git
+[submodule "openpi"]
+	path = openpi
+	url = https://github.com/Physical-Intelligence/openpi.git
