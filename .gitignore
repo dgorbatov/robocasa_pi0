@@ -1,3 +1,5 @@
 RLinf-Pi0-RoboCasa/
 __pycache__/
 video/
+video_pi05/
+.claude/

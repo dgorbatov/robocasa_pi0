@@ -1,0 +1,17 @@
+.git
+**/.git
+node_modules
+**/node_modules
+env
+venv
+.env
+__pycache__
+.cache
+.apptainer
+.cursor-server
+miniconda3
+.uv
+RLinf-Pi05-LIBERO-SFT
+RLinf-Pi0-RoboCasa
+video_pi05
+video

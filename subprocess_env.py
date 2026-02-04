@@ -6,7 +6,11 @@ corruption issues that occur when MuJoCo EGL and PyTorch CUDA share a process.
 
 import cloudpickle
 import numpy as np
-from multiprocessing import Process, Pipe
+import multiprocessing as mp
+
+# Use 'spawn' instead of 'fork' to avoid JAX multithreading issues
+# and ensure clean EGL initialization in subprocess
+_ctx = mp.get_context('spawn')
 
 
 class CloudpickleWrapper:
@@ -22,12 +26,14 @@ class CloudpickleWrapper:
         self.data = cloudpickle.loads(data)
 
 
-def _worker(parent_conn, child_conn, env_fn_wrapper):
+def _worker(parent_conn, child_conn, env_fn_wrapper, egl_device_id=None):
     """Worker process that runs the environment."""
     import os
     # Ensure MuJoCo environment variables are set in subprocess
-    os.environ.setdefault("MUJOCO_GL", "egl")
-    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    os.environ["MUJOCO_GL"] = "egl"
+    os.environ["PYOPENGL_PLATFORM"] = "egl"
+    if egl_device_id is not None:
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = str(egl_device_id)
 
     parent_conn.close()
     env = env_fn_wrapper.data()
@@ -81,17 +87,23 @@ class SubprocessEnv:
         env.close()
     """
 
-    def __init__(self, env_fn):
+    def __init__(self, env_fn, egl_device_id=None):
         """Initialize subprocess environment.
 
         Args:
             env_fn: Callable that creates and returns a robosuite environment.
                     Must be picklable (define inside a function or use lambda).
+            egl_device_id: GPU device ID for EGL rendering. If None, uses
+                          MUJOCO_EGL_DEVICE_ID from environment or defaults to 0.
         """
-        self.parent_conn, child_conn = Pipe()
-        self.process = Process(
+        import os
+        if egl_device_id is None:
+            egl_device_id = os.environ.get("MUJOCO_EGL_DEVICE_ID", "0")
+
+        self.parent_conn, child_conn = _ctx.Pipe()
+        self.process = _ctx.Process(
             target=_worker,
-            args=(self.parent_conn, child_conn, CloudpickleWrapper(env_fn)),
+            args=(self.parent_conn, child_conn, CloudpickleWrapper(env_fn), egl_device_id),
             daemon=True
         )
         self.process.start()

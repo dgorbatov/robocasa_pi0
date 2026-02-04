@@ -2,7 +2,11 @@
 """Minimal Pi0 RoboCasa rollout script.
 
 Usage:
+    # RoboCasa policy (default):
     python run_rollout.py --checkpoint /path/to/RLinf-Pi0-RoboCasa --task CloseDrawer --num_episodes 10
+
+    # LIBERO policy:
+    python run_rollout.py --policy libero --checkpoint /path/to/RLinf-Pi05-LIBERO-SFT --task CloseDrawer --num_episodes 10
 """
 
 import argparse
@@ -11,7 +15,6 @@ import numpy as np
 import torch
 import imageio
 
-from pi0_model import Pi0RobocasaModel
 from subprocess_env import SubprocessEnv
 
 
@@ -123,12 +126,13 @@ def make_env(task: str, seed: int = 0):
     return SubprocessEnv(make_env_fn(task, seed))
 
 
-def extract_obs(raw_obs: dict, task_description: str) -> dict:
+def extract_obs(raw_obs: dict, task_description: str, policy_type: str = "robocasa") -> dict:
     """Extract and format observations for Pi0.
 
     Args:
         raw_obs: Raw observation dict from robosuite
         task_description: Natural language task description
+        policy_type: Either "robocasa" or "libero" - determines observation format
 
     Returns:
         Formatted observation dict for Pi0 model
@@ -147,33 +151,41 @@ def extract_obs(raw_obs: dict, task_description: str) -> dict:
     state[12:14] = raw_obs["robot0_gripper_qvel"]  # gripper velocities
     state[14:16] = raw_obs["robot0_gripper_qpos"]  # gripper positions
 
-    return {
+    obs = {
         "main_images": torch.from_numpy(base_img).unsqueeze(0),
         "wrist_images": torch.from_numpy(wrist_img).unsqueeze(0),
         "states": torch.from_numpy(state).unsqueeze(0),
         "task_descriptions": [task_description],
     }
 
+    # For LIBERO policy, also include raw_obs for direct conversion
+    if policy_type == "libero":
+        obs["raw_obs"] = raw_obs
+
+    return obs
+
 
 def run_episode(
-    model: Pi0RobocasaModel,
+    model,
     env,
     task_description: str,
     max_steps: int = 300,
     action_chunk_size: int = 10,
     verbose: bool = True,
     video_camera: str = None,
+    policy_type: str = "robocasa",
 ) -> dict:
     """Run a single episode.
 
     Args:
-        model: Pi0 model wrapper
+        model: Pi0 model wrapper (Pi0RobocasaModel or Pi0LiberoModel)
         env: RoboCasa environment
         task_description: Natural language task description
         max_steps: Maximum steps per episode
         action_chunk_size: Number of actions to execute per inference
         verbose: Print progress
         video_camera: Camera name for video recording (None to disable)
+        policy_type: Either "robocasa" or "libero"
 
     Returns:
         Episode statistics dict with optional 'frames' key
@@ -193,11 +205,17 @@ def run_episode(
 
     while steps < max_steps:
         # Get observation - copy images immediately before any GPU ops
-        obs = extract_obs(raw_obs, task_description)
+        obs = extract_obs(raw_obs, task_description, policy_type=policy_type)
 
-        # Predict action chunk and convert to PandaOmron format
-        raw_actions = model.predict_actions(obs)  # (1, horizon, 12)
-        actions = prepare_actions_for_robocasa(raw_actions)  # (1, horizon, 12)
+        # Predict action chunk
+        raw_actions = model.predict_actions(obs)  # (1, horizon, action_dim)
+
+        # For RoboCasa policy, need to convert actions; LIBERO policy returns ready-to-use actions
+        if policy_type == "robocasa":
+            actions = prepare_actions_for_robocasa(raw_actions)  # (1, horizon, 12)
+        else:
+            # LIBERO model already returns 12D RoboCasa format
+            actions = raw_actions
 
         # Debug: print action stats on first chunk
         if steps == 0 and verbose:
@@ -242,9 +260,16 @@ def run_episode(
 def main():
     parser = argparse.ArgumentParser(description="Run Pi0 RoboCasa rollouts")
     parser.add_argument(
+        "--policy",
+        type=str,
+        choices=["robocasa", "libero"],
+        default="robocasa",
+        help="Policy type: 'robocasa' for RoboCasa-trained model, 'libero' for LIBERO-finetuned model",
+    )
+    parser.add_argument(
         "--checkpoint",
         type=str,
-        default="../RLinf/RLinf-Pi0-RoboCasa",
+        default="./RLinf-Pi0-RoboCasa",
         help="Path to Pi0 checkpoint directory",
     )
     parser.add_argument(
@@ -296,10 +321,26 @@ def main():
         default=20,
         help="Frames per second for video output",
     )
+    parser.add_argument(
+        "--pi05",
+        action="store_true",
+        help="Use Pi05 model configuration (for LIBERO policy)",
+    )
     args = parser.parse_args()
 
     print(f"Loading Pi0 model from {args.checkpoint}...")
-    model = Pi0RobocasaModel(args.checkpoint, device=args.device)
+    print(f"Policy type: {args.policy}")
+
+    if args.policy == "libero":
+        from pi0_libero_model import Pi0LiberoModel
+        model = Pi0LiberoModel(
+            args.checkpoint,
+            device=args.device,
+            pi05=args.pi05,
+        )
+    else:
+        from pi0_model import Pi0RobocasaModel
+        model = Pi0RobocasaModel(args.checkpoint, device=args.device)
 
     task_description = TASK_DESCRIPTIONS[args.task]
     print(f"Task: {args.task} - '{task_description}'")
@@ -323,6 +364,7 @@ def main():
             task_description,
             max_steps=args.max_steps,
             video_camera=video_camera,
+            policy_type=args.policy,
         )
 
         successes.append(result["success"])
