@@ -275,7 +275,7 @@ def main():
     parser.add_argument(
         "--task",
         type=str,
-        default="PnPCounterToCab",
+        default="TurnOffStove",
         choices=list(TASK_DESCRIPTIONS.keys()),
         help="RoboCasa task name",
     )

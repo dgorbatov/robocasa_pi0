@@ -75,3 +75,88 @@ The code includes JAX/numpy compatibility checks. If the checkpoint only has JAX
 - `MUJOCO_GL=egl` is set
 - `MUJOCO_EGL_DEVICE_ID` points to a valid GPU
 - The node has proper NVIDIA EGL drivers installed
+
+---
+
+## Language-Based Exploration (2026-02-04)
+
+Implements iterative goal refinement using VLM (Vision Language Model) feedback, based on [mateoguaman/dsrl_pi0](https://github.com/mateoguaman/dsrl_pi0/commit/f3d9e9e5d4368fadd823beb90a7b35a0636077d1).
+
+### Algorithm
+
+```
+for iteration 1 to K:
+  trajectory <- rollout policy with current goal g
+  if success: break
+  feedback <- VLM(trajectory)
+  history <- history + {goal, feedback}
+  g <- VLM.generate_goal(history)
+```
+
+### Key Files
+
+| File | Description |
+|------|-------------|
+| `vlm_interface.py` | VLM abstraction with MockVLM, GeminiRoboticsER, DebugVLM, BaselineVLM |
+| `language_exploration.py` | Main exploration script |
+| `language_exploration_utils.py` | Trajectory collection and VLM formatting utilities |
+| `aggregate_results.py` | Results aggregation and live monitoring |
+| `scripts/run_language_exploration.sh` | Single experiment runner |
+| `scripts/run_language_exploration_experiment.sh` | Multi-task, multi-seed systematic evaluation |
+| `scripts/run_gemini_experiment.sh` | Real Gemini VLM evaluation |
+
+### VLM Backends
+
+| Backend | Description | Use Case |
+|---------|-------------|----------|
+| `mock` | 50 hardcoded refinement strategies | Testing pipeline without API |
+| `debug` | Manual human input | Prompt engineering, debugging |
+| `gemini` | Gemini Robotics-ER integration | Real VLM evaluation |
+| `baseline` | Returns unchanged goals | Control condition |
+
+### Usage
+
+```bash
+# Test with MockVLM (no API required)
+python language_exploration.py --task CloseDrawer --vlm mock --max_iterations 5 --pi05
+
+# With Gemini (requires API key)
+export GEMINI_API_KEY="your-key"
+python language_exploration.py --task CloseDrawer --vlm gemini --max_iterations 10 --pi05
+
+# Run systematic experiment
+./scripts/run_language_exploration_experiment.sh --vlm mock --seeds 3 --tasks "CloseDrawer OpenDrawer"
+
+# Monitor results in real-time
+python aggregate_results.py --results_dir ./logs/language_exploration --watch
+```
+
+### Dependencies
+
+```bash
+# For Gemini VLM
+pip install google-genai>=0.4.0
+
+# For video encoding (usually already present)
+pip install imageio[ffmpeg]
+```
+
+### Output Structure
+
+```
+logs/language_exploration/
+├── CloseDrawer_mock_seed0_20260204_120000/
+│   ├── config.json           # Experiment configuration
+│   ├── results.json          # Final results with history
+│   ├── iteration_01_fail.mp4 # Video per iteration
+│   ├── iteration_02_fail.mp4
+│   └── iteration_03_success.mp4
+└── ...
+```
+
+### Notes
+
+- Uses existing `Pi0LiberoModel`, `SubprocessEnv`, and `TASK_DESCRIPTIONS`
+- Each iteration creates a fresh environment to ensure independence
+- Videos are saved per iteration for debugging
+- VLM inputs can be logged for debugging with `log_dir` parameter

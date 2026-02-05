@@ -3,3 +3,5 @@ __pycache__/
 video/
 video_pi05/
 .claude/
+.env
+logs/
